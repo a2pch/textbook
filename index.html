@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Textbook</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #525659; }
+  .page { display: flex; flex-direction: column; height: 100vh; }
+  header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; background: #fafafa; border-bottom: 1px solid #ddd; flex-shrink: 0; }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0; color: #222; }
+  .nav { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 13px; color: #444; }
+  .nav input { width: 60px; padding: 4px 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; text-align: center; }
+  .nav button { padding: 4px 10px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
+  .nav button:hover { background: #f0f0f0; }
+  .nav button:disabled { opacity: 0.4; cursor: default; }
+  .zoom { display: flex; align-items: center; gap: 6px; margin-right: 6px; }
+  .zoom button { min-width: 30px; }
+  .zoom .zlabel { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; cursor: pointer; }
+  .readme { padding: 10px 16px; background: #fff8e1; border-bottom: 1px solid #eee0b0; font-size: 13px; color: #444; flex-shrink: 0; }
+  .canvas-wrap { flex: 1; overflow: auto; position: relative; display: flex; justify-content: center; align-items: flex-start; padding: 20px; }
+  #pdf-canvas { background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,0.3); display: none; }
+  .status { position: absolute; top: 40px; left: 0; right: 0; text-align: center; color: #eee; font-size: 14px; padding: 0 20px; pointer-events: none; }
+  .spinner { display: inline-block; width: 22px; height: 22px; margin-right: 8px; border: 3px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; vertical-align: middle; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <h1>Textbook</h1>
+      <div class="nav">
+        <div class="zoom">
+          <button id="zoomOut" title="Zoom out">&minus;</button>
+          <span class="zlabel" id="zoomLabel">Fit</span>
+          <button id="zoomIn" title="Zoom in">+</button>
+        </div>
+        <button id="prevBtn" title="Previous page (←)">&larr;</button>
+        <input type="number" id="pageInput" min="1" value="1">
+        <span id="pageCount">/ &hellip;</span>
+        <button id="nextBtn" title="Next page (→)">&rarr;</button>
+      </div>
+    </header>
+    <div class="readme">
+      <strong>Read me:</strong> If you're looking for a numbered page from the book, add 16, 17, or 18 to that number to find it in the PDF. For "A" pages, add 867 to the number following the A.
+    </div>
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="pdf-canvas"></canvas>
+      <div class="status" id="status"><span class="spinner"></span>Loading&hellip;</div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.js"></script>
+  <script>
+    // The book is split into parts (each hosted in the same folder as this file).
+    // The viewer stitches them into one continuous book, so page numbers run
+    // 1…998 across both parts exactly as if it were a single PDF.
+    const PART_URLS = ["txtbook_part1.pdf", "txtbook_part2.pdf", "txtbook_part3.pdf", "txtbook_part4.pdf", "txtbook_part5.pdf"];
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.js";
+
+    const canvasWrap = document.getElementById("canvasWrap");
+    const canvas     = document.getElementById("pdf-canvas");
+    const ctx        = canvas.getContext("2d");
+    const statusEl   = document.getElementById("status");
+    const pageInput  = document.getElementById("pageInput");
+    const pageCount  = document.getElementById("pageCount");
+    const prevBtn    = document.getElementById("prevBtn");
+    const nextBtn    = document.getElementById("nextBtn");
+    const zoomInBtn  = document.getElementById("zoomIn");
+    const zoomOutBtn = document.getElementById("zoomOut");
+    const zoomLabel  = document.getElementById("zoomLabel");
+
+    let parts = [];        // { doc, start, count }  start = 1-based first global page
+    let totalPages = 0;
+    let currentPage = 1;
+    let rendering = false;
+    let pendingPage = null;
+    let zoom = "fit";
+    let lastFitScale = 1;
+
+    function showStatus(html){ statusEl.innerHTML = html; statusEl.style.display = "block"; }
+    function hideStatus(){ statusEl.style.display = "none"; }
+    function clamp(n, lo, hi){ return Math.max(lo, Math.min(hi, n)); }
+
+    function openDoc(url){
+      // range-stream first (fast); fall back to full download if that fails
+      return pdfjsLib.getDocument({ url, disableAutoFetch: true, disableStream: false }).promise
+        .catch(() => pdfjsLib.getDocument({ url }).promise);
+    }
+
+    (async function load(){
+      try {
+        let cursor = 1;
+        for (const url of PART_URLS){
+          const doc = await openDoc(url);
+          parts.push({ doc, start: cursor, count: doc.numPages });
+          cursor += doc.numPages;
+        }
+        totalPages = cursor - 1;
+        pageCount.textContent = "/ " + totalPages;
+        pageInput.max = totalPages;
+        queueRender(1);
+      } catch (err) {
+        showStatus("Couldn't load the book: " + err.message +
+          "<br><br>Make sure all parts (" + PART_URLS.join(", ") +
+          ") are in the same folder as this page.");
+      }
+    })();
+
+    // Map a global page (1…totalPages) to { doc, localPage }
+    function locate(globalPage){
+      for (const p of parts){
+        if (globalPage >= p.start && globalPage < p.start + p.count){
+          return { doc: p.doc, localPage: globalPage - p.start + 1 };
+        }
+      }
+      const last = parts[parts.length - 1];
+      return { doc: last.doc, localPage: last.count };
+    }
+
+    function queueRender(num){
+      if (!totalPages) return;
+      num = clamp(num, 1, totalPages);
+      updateNavUI(num);
+      if (rendering) { pendingPage = num; return; }
+      renderPage(num);
+    }
+
+    function renderPage(num){
+      rendering = true;
+      currentPage = num;
+      const { doc, localPage } = locate(num);
+      doc.getPage(localPage).then((page) => {
+        const containerWidth = canvasWrap.clientWidth - 40;
+        const base = page.getViewport({ scale: 1 });
+        const fitScale = Math.min(2, containerWidth / base.width);
+        lastFitScale = fitScale;
+        const scale = zoom === "fit" ? fitScale : zoom;
+        const viewport = page.getViewport({ scale });
+
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width  = Math.floor(viewport.width  * dpr);
+        canvas.height = Math.floor(viewport.height * dpr);
+        canvas.style.width  = Math.floor(viewport.width)  + "px";
+        canvas.style.height = Math.floor(viewport.height) + "px";
+        const transform = dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null;
+
+        return page.render({ canvasContext: ctx, viewport, transform }).promise;
+      }).then(() => {
+        canvas.style.display = "block";
+        hideStatus();
+        finishRender();
+      }).catch((err) => {
+        showStatus("Couldn't load that page, try again: " + err.message);
+        finishRender();
+      });
+    }
+
+    function finishRender(){
+      rendering = false;
+      if (pendingPage !== null && pendingPage !== currentPage){
+        const next = pendingPage; pendingPage = null; renderPage(next);
+      } else { pendingPage = null; }
+    }
+
+    function updateNavUI(num){
+      pageInput.value = num;
+      prevBtn.disabled = num <= 1;
+      nextBtn.disabled = !totalPages || num >= totalPages;
+    }
+
+    prevBtn.addEventListener("click", () => queueRender(currentPage - 1));
+    nextBtn.addEventListener("click", () => queueRender(currentPage + 1));
+
+    function jumpToInputPage(){
+      const num = parseInt(pageInput.value, 10);
+      if (totalPages && Number.isFinite(num) && num >= 1 && num <= totalPages){
+        if (num !== currentPage) queueRender(num);
+      } else { pageInput.value = currentPage; }
+    }
+    pageInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { jumpToInputPage(); pageInput.blur(); } });
+    pageInput.addEventListener("blur", jumpToInputPage);
+
+    const ZOOMS = [0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 3, 4];
+    function currentZoomValue(){ return zoom !== "fit" ? zoom : lastFitScale; }
+    function setZoom(z){
+      zoom = z;
+      zoomLabel.textContent = z === "fit" ? "Fit" : Math.round(z * 100) + "%";
+      if (totalPages) queueRender(currentPage);
+    }
+    zoomInBtn.addEventListener("click", () => { const c = currentZoomValue(); setZoom(ZOOMS.find(z => z > c + 0.001) || ZOOMS[ZOOMS.length - 1]); });
+    zoomOutBtn.addEventListener("click", () => { const c = currentZoomValue(); setZoom([...ZOOMS].reverse().find(z => z < c - 0.001) || ZOOMS[0]); });
+    zoomLabel.addEventListener("click", () => setZoom("fit"));
+
+    document.addEventListener("keydown", (e) => {
+      if (e.target === pageInput) return;
+      if (e.key === "ArrowLeft" || e.key === "PageUp") { e.preventDefault(); queueRender(currentPage - 1); }
+      else if (e.key === "ArrowRight" || e.key === "PageDown") { e.preventDefault(); queueRender(currentPage + 1); }
+    });
+
+    let resizeTimer = null;
+    window.addEventListener("resize", () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => { if (totalPages) queueRender(currentPage); }, 200);
+    });
+  </script>
+</body>
+</html>
