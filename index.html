@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -51,15 +52,17 @@
     </div>
   </div>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.js"></script>
-  <script>
+  <script type="module">
+    // pdf.js v4 ships as an ES module, so we import it (the old <script src=…pdf.min.js>
+    // tag no longer exists on the CDN). jsDelivr mirrors the official npm package.
+    import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.min.mjs";
     // The book is split into parts (each hosted in the same folder as this file).
     // The viewer stitches them into one continuous book, so page numbers run
     // 1…998 across both parts exactly as if it were a single PDF.
     const PART_URLS = ["txtbook_part1.pdf", "txtbook_part2.pdf", "txtbook_part3.pdf", "txtbook_part4.pdf", "txtbook_part5.pdf"];
 
     pdfjsLib.GlobalWorkerOptions.workerSrc =
-      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.js";
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs";
 
     const canvasWrap = document.getElementById("canvasWrap");
     const canvas     = document.getElementById("pdf-canvas");
