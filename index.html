@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -76,8 +75,15 @@
     const zoomOutBtn = document.getElementById("zoomOut");
     const zoomLabel  = document.getElementById("zoomLabel");
 
-    let parts = [];        // { doc, start, count }  start = 1-based first global page
-    let totalPages = 0;
+    // Fixed page count of each part (must match PART_URLS order). Because we know
+    // these up front, we can show 1…998 and map any page to its part WITHOUT opening
+    // a single PDF — so each file is downloaded only when you actually view a page in it.
+    const PART_COUNTS = [198, 185, 198, 199, 218];
+    const partStarts = [];            // 1-based first global page of each part
+    (function(){ let c = 1; for (let i = 0; i < PART_COUNTS.length; i++){ partStarts[i] = c; c += PART_COUNTS[i]; } })();
+    let totalPages = PART_COUNTS.reduce((a, b) => a + b, 0);   // 998
+    const docCache = {};              // part index -> Promise<pdfDoc>, opened on first use
+
     let currentPage = 1;
     let rendering = false;
     let pendingPage = null;
@@ -89,40 +95,28 @@
     function clamp(n, lo, hi){ return Math.max(lo, Math.min(hi, n)); }
 
     function openDoc(url){
-      // range-stream first (fast); fall back to full download if that fails
-      return pdfjsLib.getDocument({ url, disableAutoFetch: true, disableStream: false }).promise
-        .catch(() => pdfjsLib.getDocument({ url }).promise);
+      return pdfjsLib.getDocument({
+        url, disableAutoFetch: true, disableStream: true, disableRange: false, rangeChunkSize: 65536,
+      }).promise.catch(() => pdfjsLib.getDocument({ url }).promise);
+    }
+    // Open (and cache) a part's PDF only when it's first needed.
+    function getPartDoc(i){
+      if (!docCache[i]) docCache[i] = openDoc(PART_URLS[i]);
+      return docCache[i];
     }
 
-    (async function load(){
-      try {
-        let cursor = 1;
-        for (const url of PART_URLS){
-          const doc = await openDoc(url);
-          parts.push({ doc, start: cursor, count: doc.numPages });
-          cursor += doc.numPages;
-        }
-        totalPages = cursor - 1;
-        pageCount.textContent = "/ " + totalPages;
-        pageInput.max = totalPages;
-        queueRender(1);
-      } catch (err) {
-        showStatus("Couldn't load the book: " + err.message +
-          "<br><br>Make sure all parts (" + PART_URLS.join(", ") +
-          ") are in the same folder as this page.");
-      }
-    })();
-
-    // Map a global page (1…totalPages) to { doc, localPage }
+    // Map a global page (1…totalPages) to { i: part index, localPage }
     function locate(globalPage){
-      for (const p of parts){
-        if (globalPage >= p.start && globalPage < p.start + p.count){
-          return { doc: p.doc, localPage: globalPage - p.start + 1 };
-        }
+      for (let i = PART_COUNTS.length - 1; i >= 0; i--){
+        if (globalPage >= partStarts[i]) return { i, localPage: globalPage - partStarts[i] + 1 };
       }
-      const last = parts[parts.length - 1];
-      return { doc: last.doc, localPage: last.count };
+      return { i: 0, localPage: 1 };
     }
+
+    // Show the total immediately; no PDF is downloaded until a page is viewed.
+    pageCount.textContent = "/ " + totalPages;
+    pageInput.max = totalPages;
+    queueRender(1);
 
     function queueRender(num){
       if (!totalPages) return;
@@ -135,8 +129,8 @@
     function renderPage(num){
       rendering = true;
       currentPage = num;
-      const { doc, localPage } = locate(num);
-      doc.getPage(localPage).then((page) => {
+      const { i, localPage } = locate(num);
+      getPartDoc(i).then((doc) => doc.getPage(localPage)).then((page) => {
         const containerWidth = canvasWrap.clientWidth - 40;
         const base = page.getViewport({ scale: 1 });
         const fitScale = Math.min(2, containerWidth / base.width);
